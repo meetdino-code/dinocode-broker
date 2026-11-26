@@ -25,6 +25,9 @@ export async function handle(
   if (route === "token" && request.method === "POST") {
     return token(request, name, provider, env, fetcher);
   }
+  if (route === "revoke" && request.method === "POST" && provider.revokeUrl) {
+    return revoke(request, provider.revokeUrl, fetcher);
+  }
   return json(404, { error: "not_found" });
 }
 
@@ -49,16 +52,8 @@ async function token(
   env: Env,
   fetcher: typeof fetch,
 ): Promise<Response> {
-  const type = request.headers.get("content-type") ?? "";
-  if (!type.startsWith("application/x-www-form-urlencoded")) {
-    return json(415, { error: "unsupported_media_type" });
-  }
-  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY) {
-    return json(413, { error: "body_too_large" });
-  }
-  const text = await request.text();
-  if (text.length > MAX_BODY) return json(413, { error: "body_too_large" });
-  const form = new URLSearchParams(text);
+  const form = await readForm(request);
+  if (form instanceof Response) return form;
   const grant = form.get("grant_type") ?? "";
   if (!GRANTS.includes(grant)) return json(400, { error: "unsupported_grant_type" });
   const base = env.BROKER_BASE_URL?.replace(/\/+$/, "");
@@ -75,9 +70,34 @@ async function token(
   }
   body.set("client_id", id);
   body.set("client_secret", secret);
+  return forward(provider.tokenUrl, body, fetcher);
+}
+
+async function revoke(request: Request, url: string, fetcher: typeof fetch): Promise<Response> {
+  const form = await readForm(request);
+  if (form instanceof Response) return form;
+  const token = form.get("token");
+  if (!token) return json(400, { error: "invalid_request" });
+  return forward(url, new URLSearchParams({ token }), fetcher);
+}
+
+async function readForm(request: Request): Promise<URLSearchParams | Response> {
+  const type = request.headers.get("content-type") ?? "";
+  if (!type.startsWith("application/x-www-form-urlencoded")) {
+    return json(415, { error: "unsupported_media_type" });
+  }
+  if (Number(request.headers.get("content-length") ?? 0) > MAX_BODY) {
+    return json(413, { error: "body_too_large" });
+  }
+  const text = await request.text();
+  if (text.length > MAX_BODY) return json(413, { error: "body_too_large" });
+  return new URLSearchParams(text);
+}
+
+async function forward(url: string, body: URLSearchParams, fetcher: typeof fetch): Promise<Response> {
   let answer: Response;
   try {
-    answer = await fetcher(provider.tokenUrl, {
+    answer = await fetcher(url, {
       method: "POST",
       headers: { "content-type": "application/x-www-form-urlencoded", accept: "application/json" },
       body,

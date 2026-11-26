@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import { handle } from "../lib/broker.js";
+import { providers } from "../lib/providers.js";
 
 const env = {
   BROKER_BASE_URL: "https://broker.meetdino.co/",
@@ -144,5 +145,59 @@ describe("token", () => {
     });
     const response = await handle(request, { SLACK_CLIENT_ID: "123.456" }, unreachable());
     expect(response.status).toBe(500);
+  });
+});
+
+describe("revoke", () => {
+  it("posts only the token to Slack's fixed URL and adds no secret", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () =>
+      new Response('{"ok":true,"revoked":true}', {
+        status: 200,
+        headers: { "content-type": "application/json" },
+      }),
+    );
+    const response = await post(
+      "/revoke/slack",
+      { token: "xoxe.xoxp-1", token_type_hint: "access_token", client_id: "someone-else", test: "1" },
+      fetcher,
+    );
+    expect(response.status).toBe(200);
+    expect(await response.text()).toBe('{"ok":true,"revoked":true}');
+    expect(fetcher).toHaveBeenCalledOnce();
+    const [url, init] = fetcher.mock.calls[0];
+    expect(url).toBe("https://slack.com/api/auth.revoke");
+    expect(init?.redirect).toBe("error");
+    expect(Object.fromEntries(init?.body as URLSearchParams)).toEqual({ token: "xoxe.xoxp-1" });
+    expect(JSON.stringify(init?.headers)).not.toContain("shh");
+  });
+
+  it("returns the provider's status and body unchanged", async () => {
+    const fetcher = vi.fn<typeof fetch>(async () => new Response('{"ok":false,"error":"invalid_auth"}', { status: 200 }));
+    const response = await post("/revoke/slack", { token: "xoxe-1-refresh" }, fetcher);
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ ok: false, error: "invalid_auth" });
+  });
+
+  it("refuses a request with no token", async () => {
+    const response = await post("/revoke/slack", { token_type_hint: "access_token" });
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({ error: "invalid_request" });
+  });
+
+  it("refuses unknown providers, providers that can't revoke, big bodies and other content types", async () => {
+    expect((await post("/revoke/unknown", { token: "t" })).status).toBe(404);
+    providers.norevoke = { tokenUrl: "https://example.com/token", clientId: "ID", clientSecret: "SECRET" };
+    try {
+      expect((await post("/revoke/norevoke", { token: "t" })).status).toBe(404);
+    } finally {
+      delete providers.norevoke;
+    }
+    expect((await post("/revoke/slack", { token: "x".repeat(9000) })).status).toBe(413);
+    const json = new Request("https://broker.meetdino.co/revoke/slack", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: '{"token":"t"}',
+    });
+    expect((await handle(json, env, unreachable())).status).toBe(415);
   });
 });
